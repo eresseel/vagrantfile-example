@@ -1,0 +1,57 @@
+# -*- mode: ruby -*
+# vi: set ft=ruby
+
+Vagrant.configure("2") do |config|
+    # hostname setting
+    test = "test11"
+    # add ssh key
+    ssh_key = "testkey"
+    system("ssh-keygen -N \'\' -f #{ssh_key}") unless File.exists?(ssh_key)
+    ssh_pubkey = File.read("#{ssh_key}.pub")
+    config.vm.define "#{test}-server" do |node|
+        node.vm.box = "generic/ubuntu1804"
+        node.vm.hostname = "#{test}-server"
+        # linked clone
+        node.vm.provider "virtualbox" do |vbox|
+            vbox.name = "#{test}-server"
+            vbox.linked_clone = true
+            # simulating virtio on nat
+            vbox.default_nic_type = "virtio"
+            # cpu and memoria limit
+            vbox.memory = 1024
+            vbox.cpus = 1
+            # add disk
+            disk_file = "#{test}.vdi"
+            unless File.exists?(disk_file)
+                vbox.customize ['storagectl', :id, '--name', 'Virtual I/O Device SCSI controller', '--add', 'virtio-scsi', '--portcount', 4]
+            vbox.customize ['createhd', '--filename', disk_file, '--variant', "Standard", '--size', 10*1024] unless File.exists?(disk_file)
+            vbox.customize ['storageattach', :id, '--storagectl', 'Virtual I/O Device SCSI controller', '--port', 1, '--device', 0, '--type', 'hdd', '--medium', disk_file]
+            end
+        end
+        # run an inline shell script
+        node.vm.provision "shell", inline: "apt-get update && apt-get -y install nginx zfsutils && zpool create -m /srv/ srv /dev/sda"
+        # port forwarding
+        node.vm.network :forwarded_port, guest: 80, host: 1234
+        # mount folder
+        node.vm.synced_folder ".", "/var/www/html", SharedFoldersEnableSymlinksCreate: false, disabled: false
+        # private network
+        node.vm.network "private_network", ip: "192.168.56.10", auto_config: true, virtualbox_intnet: true
+        # add ssh key
+        node.vm.provision "shell", inline: "echo \"#{ssh_pubkey}\" >> ~/vagrant/.ssh/authorized_keys" unless not ssh_pubkey.is_a?(String) # rootkent fut
+    end
+
+    config.vm.define "#{test}-client", primary: true do |node| # automated ssh login
+        node.vm.box = "generic/ubuntu1804"
+        node.vm.hostname = "#{test}-client"
+        node.vm.provider "virtualbox" do |vbox|
+            vbox.name = "#{test}-client"
+            vbox.linked_clone = true
+            vbox.default_nic_type = "virtio"
+            vbox.memory = 512
+            vbox.cpus = 1
+        end
+        node.vm.provision "shell", inline: "apt-get update"
+        node.vm.network "private_network", ip: "192.168.56.100", auto_config: true, virtualbox_intnet: true
+        node.vm.provision "file", source: "#{ssh_key}", destination: "~/.ssh/id_rsa"
+    end
+  end

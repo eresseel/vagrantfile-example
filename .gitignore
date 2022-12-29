@@ -1,0 +1,7 @@
+*/.vagrant
+*/ansible.log
+*/roles
+*/*.vdi
+*/testkey
+*/testkey.pub
+*/files

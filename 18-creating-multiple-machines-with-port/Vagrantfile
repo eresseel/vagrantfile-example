@@ -1,0 +1,146 @@
+# -*- mode: ruby -*
+# vi: set ft=ruby
+
+def ansible_playbook(instance, limit=nil, name='setup', tags=nil, playbook='./provision.yml')
+    limit ||= 'all'
+  
+    instance.vm.provision name, type: "ansible" do |ansible|
+        ansible.playbook          = playbook
+        ansible.config_file       = "ansible.cfg"
+        ansible.galaxy_role_file  = "./requirements.yml"
+        ansible.galaxy_roles_path = "./roles"
+        ansible.galaxy_command    = "ansible-galaxy install --role-file=%{role_file} --roles-path=%{roles_path}"
+        if File.file?("#{ENV['HOME']}/.vagrant.d/vault_password_files.d/ci-playbook.txt") then
+            ansible.vault_password_file = "#{ENV['HOME']}/.vagrant.d/vault_password_files.d/ci-playbook.txt"
+        else
+            ansible.ask_vault_pass = true
+        end
+        ansible.groups = {
+            "server" => ["test18-server"],
+            "client" => ["test18-client"]
+        }
+        ansible.limit = limit
+        unless tags.nil? || tags == ''
+            ansible.tags  = tags
+        end
+    end
+end
+
+Vagrant.configure("2") do |config|
+    test = "test18"
+
+    ssh_key = "testkey"
+    system("ssh-keygen -N \'\' -f #{ssh_key}") unless File.exists?(ssh_key)
+    ssh_pubkey = File.read("#{ssh_key}.pub")
+
+    default_disktype = "Standard"
+    default_box = "generic/ubuntu1804"
+    domain_name = "#{test}"
+
+    provision_ansible = <<-SCRIPT
+        hostname -I
+    SCRIPT
+
+    message = "Machine already provisioned. Run `vagrant provision`\n" \
+            + "The machine domain address: http://#{domain_name}/\n" \
+            + "The machine IP address: http://"
+
+    config.vm.box_check_update = true
+
+    machines=[ {
+        :hostname => "#{test}-server",
+        :ip => "192.168.56.10",
+        :disk => 2,
+        :disksize => 10,
+        :disktype => "#{default_disktype}",
+        :memory => 1024,
+        :cpu => 2,
+        :script => [],
+        :port => [], #{ :guest => "80", :host => "8888" },
+        :post_up_message => "#{message}",
+        :ansible => [
+            { :limit => "server"}
+        ]
+        }, {
+        :hostname => "#{test}-client",
+        :ip => "192.168.56.100",
+        :memory => 512,
+        :cpu => 1,
+        :script => [],
+        :shell => provision_ansible,
+        :sync => [
+            { :src => ".", :dst => "/home/vagrant/vagrant" },
+            { :src => ".", :dst => "/home/vagrant/ansible" }
+        ],
+        :files => [
+            { :src => "#{ssh_key}", :dst => "~/.ssh/id_rsa" },
+            { :src => "#{ssh_key}.pub", :dst => "~/.ssh/id_rsa.pub" }
+        ],
+        :port => [
+            { :guest => "80", :host => "8888" }
+        ],
+        :post_up_message => "#{message}",
+        :ansible => [
+            { :limit => "client"}
+        ]
+        }
+    ]
+
+    machines.each do |machine|
+        config.vm.define machine[:hostname] do |node|
+            if (machine[:box].is_a?String)
+                node.vm.box = machine[:box]
+            else
+                node.vm.box = default_box
+            end
+            node.vm.hostname = machine[:hostname]
+            node.vm.network "private_network", ip: machine[:ip], auto_config: true, virtualbox_intnet: true
+            if machine[:port].is_a?(Array)
+                machine[:port].each do |p|
+                    node.vm.network :forwarded_port, guest: "#{p[:guest]}", host: "#{p[:host]}"
+                    node.vm.post_up_message = machine[:post_up_message] \
+                                            + "#{machine[:ip]}:#{p[:host]}/\n" \
+                                            + "echo '#{machine[:ip]}  #{domain_name}' | sudo tee -a /etc/hosts"
+                end
+            end 
+            if machine[:port].empty?
+                node.vm.post_up_message = machine[:post_up_message] \
+                                        + "#{machine[:ip]}/\n" \
+                                        + "echo '#{machine[:ip]}  #{domain_name}' | sudo tee -a /etc/hosts"
+            end
+            if machine[:sync].is_a?(Array)
+                machine[:sync].each do |s|
+                    node.vm.synced_folder "#{s[:src]}", "#{s[:dst]}"
+                end
+            end
+            if machine[:files].is_a?(Array)
+                machine[:files].each do |file|
+                    node.vm.provision "file", source: "#{file[:src]}", destination: "#{file[:dst]}"
+                end
+            end
+            if machine[:ansible].is_a?(Array)
+                machine[:ansible].each do |a|
+                    ansible_playbook(instance=node, limit="#{a[:limit]}")
+                end
+            end
+            node.vm.provision "shell", path: "#{machine[:script]}" unless not machine [:script].is_a?(String)
+            node.vm.provision "shell", inline: "#{machine[:shell]}" unless not machine [:shell].is_a?(String)
+            node.vm.provision "shell", inline: "echo \"#{ssh_pubkey}\" >> ~vagrant/.ssh/authorized_keys" unless not ssh_pubkey.is_a?(String)
+            node.vm.provider "virtualbox" do |vbox|
+                vbox.name = machine[:hostname]
+                vbox.linked_clone = true
+                vbox.default_nic_type = "virtio"
+                vbox.memory = machine[:memory]
+                vbox.cpus = machine[:cpu]
+                if (machine[:disk].is_a?Integer and machine[:disk] >= 1)
+                    vbox.customize ['storagectl', :id, '--name', 'Virtual I/O Device SCSI controller', '--add', 'virtio-scsi', '--portcount', machine[:disk]]
+                    (1..machine[:disk]).each do |disk|
+                        disk_file = "#{test}-#{disk}.vdi"
+                        vbox.customize ['createhd', '--filename', disk_file, '--variant', machine[:disktype], '--size', machine[:disksize]*1024] unless File.exists?(disk_file)
+                        vbox.customize ['storageattach', :id, '--storagectl', 'Virtual I/O Device SCSI controller', '--port', disk, '--device', 0, '--type', 'hdd', '--medium', disk_file]
+                    end
+                end
+            end
+        end
+    end
+end
