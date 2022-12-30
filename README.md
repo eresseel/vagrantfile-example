@@ -1,7 +1,7 @@
 # vagrant-example
 This description applies to 19-creating-multiple-machines-with-disk-on-vm-folder vagrantfile.
 
-##Table of variable
+## Table of variable
 
 | variable        | must be used | example                                                                                             |
 | --------------- | ------------ | --------------------------------------------------------------------------------------------------- |
